@@ -1,0 +1,133 @@
+name: Build Linguist
+
+on:
+  schedule:
+    - cron: "0 0 */4 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-linguist
+  cancel-in-progress: false
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Find Latest Upstream Release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME=$(gh api repos/translate-tools/linguist/releases/latest --jq .tag_name)
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Unexpected upstream release tag: $TAG_NAME"
+            exit 1
+          fi
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_tag=linguist-$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Check Existing Release
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.release_tag }}
+        run: |
+          RELEASE_TAGS=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
+          if grep -Fxq "$RELEASE_TAG" <<< "$RELEASE_TAGS"; then
+            echo "Release $RELEASE_TAG already exists."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout Upstream Source
+        if: steps.check_release.outputs.exists == 'false'
+        uses: actions/checkout@v6
+        with:
+          repository: translate-tools/linguist
+          ref: ${{ steps.upstream.outputs.tag_name }}
+          path: linguist
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: steps.check_release.outputs.exists == 'false'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            linguist/package-lock.json
+            linguist/thirdparty/bergamot/package-lock.json
+
+      - name: Install Dependencies
+        if: steps.check_release.outputs.exists == 'false'
+        working-directory: linguist
+        env:
+          HUSKY: '0'
+        run: npm ci
+
+      - name: Build Offline Translator
+        if: steps.check_release.outputs.exists == 'false'
+        working-directory: linguist/thirdparty/bergamot
+        run: |
+          npm ci
+          npm run worker:build
+          # Use upstream's pinned Bergamot revision and Emscripten SDK.
+          make buildWasm exportWasm
+
+      - name: Build Chrome MV3 for Brave
+        if: steps.check_release.outputs.exists == 'false'
+        working-directory: linguist
+        # The chrome target omits the upstream CRX update URL used by chromium.
+        run: make build-chrome
+
+      - name: Package Extension
+        if: steps.check_release.outputs.exists == 'false'
+        id: artifact
+        env:
+          RELEASE_TAG: ${{ steps.upstream.outputs.release_tag }}
+        run: |
+          MANIFEST=linguist/build/chrome/manifest.json
+          jq -e '.manifest_version == 3 and (.background.service_worker | type == "string") and (has("update_url") | not)' "$MANIFEST"
+          test -f "linguist/build/chrome/$(jq -r '.background.service_worker' "$MANIFEST")"
+          test -s linguist/build/chrome/thirdparty/bergamot/bergamot-translator-worker.wasm
+
+          ARTIFACT="${RELEASE_TAG}-chrome-mv3.zip"
+          cd linguist/build/chrome
+          zip -r -q "$GITHUB_WORKSPACE/$ARTIFACT" .
+          cd "$GITHUB_WORKSPACE"
+          sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+          echo "path=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        if: steps.check_release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.upstream.outputs.tag_name }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.release_tag }}
+          ARTIFACT: ${{ steps.artifact.outputs.path }}
+        run: |
+          SOURCE_SHA=$(git -C linguist rev-parse HEAD)
+          cat > release-notes.md <<EOF
+          Built from [translate-tools/linguist $TAG_NAME](https://github.com/translate-tools/linguist/tree/$TAG_NAME).
+          Source commit: $SOURCE_SHA
+
+          Chrome Manifest V3 build for Brave and other Chromium browsers, including the offline translation engine.
+
+          Installation in Brave:
+          1. Download and extract $ARTIFACT to a permanent directory.
+          2. Open brave://extensions and enable Developer mode.
+          3. Click Load unpacked and select the extracted directory containing manifest.json.
+
+          To update, replace the contents of the same directory with a newer release and click Reload on the extension.
+          EOF
+          gh release create "$RELEASE_TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Linguist $TAG_NAME (Brave / Chromium MV3)" \
+            --notes-file release-notes.md \
+            --latest
