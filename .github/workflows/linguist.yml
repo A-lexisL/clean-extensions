@@ -76,13 +76,11 @@ jobs:
         run: |
           npm ci
           npm run worker:build
-          # Use upstream's pinned Bergamot revision and Emscripten SDK.
           make buildWasm exportWasm
 
       - name: Build Chrome MV3 for Brave
         if: steps.check_release.outputs.exists == 'false'
         working-directory: linguist
-        # The chrome target omits the upstream CRX update URL used by chromium.
         run: make build-chrome
 
       - name: Package Extension
@@ -117,13 +115,6 @@ jobs:
           Source commit: $SOURCE_SHA
 
           Chrome Manifest V3 build for Brave and other Chromium browsers, including the offline translation engine.
-
-          Installation in Brave:
-          1. Download and extract $ARTIFACT to a permanent directory.
-          2. Open brave://extensions and enable Developer mode.
-          3. Click Load unpacked and select the extracted directory containing manifest.json.
-
-          To update, replace the contents of the same directory with a newer release and click Reload on the extension.
           EOF
           gh release create "$RELEASE_TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
             --repo "$GITHUB_REPOSITORY" \
