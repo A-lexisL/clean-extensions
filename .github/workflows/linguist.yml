@@ -81,7 +81,9 @@ jobs:
       - name: Build Chrome MV3 for Brave
         if: steps.check_release.outputs.exists == 'false'
         working-directory: linguist
-        run: make build-chrome
+        run: |
+          cp .env.example .env
+          make build-chrome
 
       - name: Package Extension
         if: steps.check_release.outputs.exists == 'false'
