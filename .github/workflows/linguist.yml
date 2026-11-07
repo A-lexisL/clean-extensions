@@ -81,9 +81,10 @@ jobs:
       - name: Build Chrome MV3 for Brave
         if: steps.check_release.outputs.exists == 'false'
         working-directory: linguist
-        run: |
-          cp .env.example .env
-          make build-chrome
+        env:
+          NODE_ENV: production
+          EXT_TARGET: chrome
+        run: npx --no-install webpack-cli -c ./webpack.config.js
 
       - name: Package Extension
         if: steps.check_release.outputs.exists == 'false'
